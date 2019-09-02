@@ -282,6 +282,20 @@ func alloc(size uintptr) unsafe.Pointer {
 
 func free(ptr unsafe.Pointer) {
 	// TODO: free blocks on request, when the compiler knows they're unused.
+	first := blockFromAddr(uintptr(ptr)).findHead()
+	for block := first; block < endBlock; block++ {
+		switch block.state() {
+		case blockStateHead:
+			if block != first {
+				return
+			}
+			fallthrough
+		case blockStateTail:
+			block.markFree()
+		case blockStateFree:
+			return
+		}
+	}
 }
 
 // GC performs a garbage collection cycle.
