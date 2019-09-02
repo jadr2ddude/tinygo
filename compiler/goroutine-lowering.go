@@ -241,7 +241,7 @@ func (c *Compiler) markAsyncFunctions() (needsScheduler bool, err error) {
 
 	if len(worklist) == 0 {
 		// There are no blocking operations, so no need to transform anything.
-		return false, c.lowerMakeGoroutineCalls()
+		return false, c.lowerMakeGoroutineCalls(nil)
 	}
 
 	// Find all async functions.
@@ -348,7 +348,7 @@ func (c *Compiler) markAsyncFunctions() (needsScheduler bool, err error) {
 		// No scheduler is needed. Do not transform all functions here.
 		// However, make sure that all go calls (which are all non-async) are
 		// transformed into regular calls.
-		return false, c.lowerMakeGoroutineCalls()
+		return false, c.lowerMakeGoroutineCalls(nil)
 	}
 
 	// replace indefinitely blocking yields
@@ -832,6 +832,36 @@ func (c *Compiler) markAsyncFunctions() (needsScheduler bool, err error) {
 		inst.EraseFromParentAsInstruction()
 	}
 
+	// mark functions that do not require a parent handle
+	parentNotRequired := map[llvm.Value]bool{}
+	activate := c.mod.NamedFunction("runtime.activateTask")
+	for _, f := range asyncList {
+		if f == yield {
+			continue
+		}
+		var parentHandle llvm.Value
+		parentHandle = f.LastParam()
+		if parentHandle.IsNil() || parentHandle.Name() != "parentHandle" {
+			// sanity check
+			panic("trying to make exported function async: " + f.Name())
+		}
+		coroDebugPrintln("scanning for non-activate usage of parent handle", f.Name())
+		var usesNonActivate bool
+		for _, v := range getUses(parentHandle) {
+			if v.IsACallInst().IsNil() || v.CalledValue() != activate {
+				coroDebugPrintln("found non-activate usage of parent handle", f.Name())
+				usesNonActivate = true
+				break
+			}
+		}
+		if !usesNonActivate {
+			coroDebugPrintln("parent handle not required", f.Name())
+			parentNotRequired[f] = true
+		} else {
+			coroDebugPrintln("parent handle required", f.Name())
+		}
+	}
+
 	// ditch invalid function attributes
 	bads := []llvm.Value{c.mod.NamedFunction("runtime.setTaskStatePtr")}
 	for _, f := range append(bads, asyncList...) {
@@ -852,14 +882,14 @@ func (c *Compiler) markAsyncFunctions() (needsScheduler bool, err error) {
 		inst.EraseFromParentAsInstruction()
 	}
 
-	return true, c.lowerMakeGoroutineCalls()
+	return true, c.lowerMakeGoroutineCalls(parentNotRequired)
 }
 
 // Lower runtime.makeGoroutine calls to regular call instructions. This is done
 // after the regular goroutine transformations. The started goroutines are
 // either non-blocking (in which case they can be called directly) or blocking,
 // in which case they will ask the scheduler themselves to be rescheduled.
-func (c *Compiler) lowerMakeGoroutineCalls() error {
+func (c *Compiler) lowerMakeGoroutineCalls(parentNotRequired map[llvm.Value]bool) error {
 	// The following Go code:
 	//   go startedGoroutine()
 	//
@@ -871,6 +901,11 @@ func (c *Compiler) lowerMakeGoroutineCalls() error {
 	//
 	// This function rewrites it to a direct call:
 	//   call void @main.startedGoroutine(i8* undef, i8* null)
+
+	if parentNotRequired == nil {
+		parentNotRequired = map[llvm.Value]bool{}
+	}
+	parentNotRequired[c.mod.NamedFunction("runtime.fakeCoroutine")] = true
 
 	makeGoroutine := c.mod.NamedFunction("runtime.makeGoroutine")
 	for _, goroutine := range getUses(makeGoroutine) {
@@ -893,9 +928,11 @@ func (c *Compiler) lowerMakeGoroutineCalls() error {
 			params = append(params, realCall.Operand(i))
 		}
 		c.builder.SetInsertPointBefore(realCall)
-		if goroutine.InstructionParent().Parent() == c.mod.NamedFunction("runtime.getFakeCoroutine") {
-			params[len(params)-1] = llvm.Undef(c.i8ptrType)
+		if parentNotRequired[origFunc] {
+			coroDebugPrintln("providing nil parent handle in goroutine call", goroutine.InstructionParent().Parent().Name(), origFunc.Name())
+			params[len(params)-1] = llvm.ConstNull(c.i8ptrType)
 		} else {
+			coroDebugPrintln("providing fake parent handle in goroutine call", goroutine.InstructionParent().Parent().Name(), origFunc.Name())
 			params[len(params)-1] = c.createRuntimeCall("getFakeCoroutine", []llvm.Value{}, "") // parent coroutine handle (must not be nil)
 		}
 		c.builder.CreateCall(origFunc, params, "")
