@@ -182,6 +182,11 @@ func NewCompiler(pkgName string, config Config) (*Compiler, error) {
 	return c, nil
 }
 
+func (c *Compiler) Dispose() {
+	c.mod.Dispose()
+	c.ctx.Dispose()
+}
+
 func (c *Compiler) Packages() []*loader.Package {
 	return c.ir.LoaderProgram.Sorted()
 }

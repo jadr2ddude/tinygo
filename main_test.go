@@ -108,6 +108,7 @@ func runTest(path, tmpdir string, target string, t *testing.T) {
 	if err != nil {
 		t.Fatal("could not open expected output file:", err)
 	}
+	defer f.Close()
 	expected, err := ioutil.ReadAll(f)
 	if err != nil {
 		t.Fatal("could not read expected output file:", err)
