@@ -20,6 +20,8 @@ import (
 
 const schedulerDebug = false
 
+var schedulerDone bool
+
 // Queues used by the scheduler.
 var (
 	runqueue           task.Queue
@@ -114,7 +116,7 @@ func addSleepTask(t *task.Task, duration timeUnit) {
 func scheduler() {
 	// Main scheduler loop.
 	var now timeUnit
-	for {
+	for !schedulerDone {
 		scheduleLog("")
 		scheduleLog("  schedule")
 		if sleepQueue != nil {
