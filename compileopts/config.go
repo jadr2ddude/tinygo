@@ -101,7 +101,7 @@ func (c *Config) NeedsStackObjects() bool {
 }
 
 // Scheduler returns the scheduler implementation. Valid values are "none",
-//"coroutines" and "tasks".
+// "coroutines", "softstack" and "tasks".
 func (c *Config) Scheduler() string {
 	if c.Options.Scheduler != "" {
 		return c.Options.Scheduler
@@ -150,7 +150,7 @@ func (c *Config) OptLevels() (optLevel, sizeLevel int, inlinerThreshold uint) {
 // target.
 func (c *Config) FuncImplementation() string {
 	switch c.Scheduler() {
-	case "tasks":
+	case "tasks", "softstack":
 		// A func value is implemented as a pair of pointers:
 		//     {context, function pointer}
 		// where the context may be a pointer to a heap-allocated struct

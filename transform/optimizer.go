@@ -125,6 +125,9 @@ func Optimize(mod llvm.Module, config *compileopts.Config, optLevel, sizeLevel i
 		if err != nil {
 			return []error{err}
 		}
+	case "softstack":
+		// Lower async as softstack.
+		SoftStackify(mod)
 	case "tasks":
 		// No transformations necessary.
 	case "none":
@@ -216,7 +219,7 @@ var coroFunctionsUsedInTransforms = []string{
 func getFunctionsUsedInTransforms(config *compileopts.Config) []string {
 	fnused := functionsUsedInTransforms
 	switch config.Scheduler() {
-	case "none":
+	case "none", "softstack":
 	case "coroutines":
 		fnused = append(append([]string{}, fnused...), coroFunctionsUsedInTransforms...)
 	case "tasks":

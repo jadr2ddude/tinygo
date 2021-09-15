@@ -116,8 +116,9 @@ func SplitBasicBlock(builder llvm.Builder, afterInst llvm.Value, insertAfter llv
 	// Move instructions.
 	builder.SetInsertPointAtEnd(newBlock)
 	for _, inst := range nextInstructions {
+		instName := inst.Name()
 		inst.RemoveFromParentAsInstruction()
-		builder.Insert(inst)
+		builder.InsertWithName(inst, instName)
 	}
 
 	// Find PHI nodes to update.
@@ -159,9 +160,11 @@ func SplitBasicBlock(builder llvm.Builder, afterInst llvm.Value, insertAfter llv
 			incomingVals[i] = value
 			incomingBlocks[i] = block
 		}
+		name := phi.Name()
 		newPhi.AddIncoming(incomingVals, incomingBlocks)
 		phi.ReplaceAllUsesWith(newPhi)
 		phi.EraseFromParentAsInstruction()
+		newPhi.SetName(name)
 	}
 
 	return newBlock

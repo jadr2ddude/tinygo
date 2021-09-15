@@ -92,7 +92,7 @@ func (b *builder) createGo(instr *ssa.Go) {
 		switch b.Scheduler {
 		case "none", "coroutines":
 			// There are no additional parameters needed for the goroutine start operation.
-		case "tasks":
+		case "tasks", "softstack":
 			// Add the function pointer as a parameter to start the goroutine.
 			params = append(params, funcPtr)
 		default:
@@ -107,7 +107,7 @@ func (b *builder) createGo(instr *ssa.Go) {
 	paramBundle := b.emitPointerPack(params)
 	var callee, stackSize llvm.Value
 	switch b.Scheduler {
-	case "none", "tasks":
+	case "none", "tasks", "softstack":
 		callee = b.createGoroutineStartWrapper(funcPtr, prefix, hasContext, instr.Pos())
 		if b.AutomaticStackSize {
 			// The stack size is not known until after linking. Call a dummy

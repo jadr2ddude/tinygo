@@ -1,4 +1,5 @@
-// +build scheduler.coroutines
+//go:build scheduler.coroutines || scheduler.softstack
+// +build scheduler.coroutines scheduler.softstack
 
 package runtime
 
