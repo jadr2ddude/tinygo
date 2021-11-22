@@ -159,6 +159,9 @@ func main() {
 	// libc: test basic stdio functionality
 	putsBuf := []byte("line written using C puts\x00")
 	C.puts((*C.char)(unsafe.Pointer(&putsBuf[0])))
+
+	// Test atomics.
+	testAtomics()
 }
 
 func printUnion(union C.joined_t) C.joined_t {
