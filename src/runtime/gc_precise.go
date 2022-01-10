@@ -13,8 +13,9 @@ const (
 
 const (
 	ptrSize       = unsafe.Sizeof(unsafe.Pointer(nil))
-	wordsPerBlock = 4 // number of pointers in an allocated block
-	bytesPerBlock = wordsPerBlock * ptrSize
+	ptrAlign      = unsafe.Alignof(unsafe.Pointer(nil))
+	wordsPerBlock = 4 // number of words in an allocated block
+	bytesPerBlock = wordsPerBlock * (ptrSize - ptrAlign)
 )
 
 var (
@@ -58,13 +59,13 @@ func (b gcBlock) end() gcBlock {
 // The zero value represents an empty block.
 // The lower 3 bits are used to store the gcBlockState.
 // The fourth bit is used to implement the scan tree.
-// See gc_precise_avr.go and gc_precise_other.go for the representation of the upper 4 bits.
+// The upper 4 bits hold a bitmap of what words may contain pointers.
 type gcBlockMeta uint8
 
 const (
 	gcBlockStateMask    gcBlockMeta = 0b0111
 	gcBlockChildPending gcBlockMeta = 0b1000
-	gcBlockExtraMask    gcBlockMeta = 0b11110000
+	gcBlockBitmapMask   gcBlockMeta = 0b11110000
 )
 
 // state returns the gcBlockState of the block.
@@ -92,11 +93,11 @@ func (d *gcBlockMeta) clearChildPending() {
 	*d &^= gcBlockChildPending
 }
 
-func (d *gcBlockMeta) setExtra(extra uint8) uint8 {
-	d = (d &^ gcBlockExtraMask) | (extra << 4)
+func (d *gcBlockMeta) setBitmap(bm uint8) uint8 {
+	d = (d &^ gcBlockBitmapMask) | (bm << 4)
 }
 
-func (d gcBlockMeta) extra() uint8 {
+func (d gcBlockMeta) bitmap() uint8 {
 	return uint8(d >> 4)
 }
 
@@ -300,6 +301,44 @@ func (b gcBlock) findHead() gcBlock {
 	return b
 }
 
+// alloc tries to find some free space on the heap, possibly doing a garbage
+// collection cycle if needed. If no space is free, it panics.
+//go:noinline
+func alloc(size uintptr, layout unsafe.Pointer) unsafe.Pointer {
+	if size == 0 {
+		return unsafe.Pointer(&zeroSizedAlloc)
+	}
+
+	// Calculate the number of blocks needed to hold this data.
+	var blocks uintptr
+	if layout == nil {
+		blocks = sizeBlocks(size)
+	}
+
+	// Reserve memory to hold the data.
+	start, ok := findMem(blocks)
+	if !ok {
+		// No memory was available.
+		runtimePanic("out of memory")
+	}
+
+	// Clear the memory.
+	startPtr := unsafe.Pointer(start.data())
+	memzero(startPtr, bytesPerBlock*blocks)
+
+	// Appropriately type the memory.
+	if layout == nil {
+		// There are no pointers within this type.
+		start.meta().setState(blockStateHeadNoPointers)
+	} else {
+		// Apply the GC layout.
+		start.applyLayout(layout)
+		start.meta().setState(blockStateHead)
+	}
+
+	return startPtr
+}
+
 // findMem reserves a contiguous range of n blocks.
 // The allocation is initialized in an unmanaged state.
 // It may run a garbage collection cycle if needed.
@@ -315,7 +354,7 @@ func findMem(n uintptr) (gcBlock, bool) {
 	for {
 		// Try to allocate with the current heap size.
 		if block, ok := tryFindMem(n); ok {
-			return block
+			return block, true
 		}
 
 		// Try to grow the heap.
@@ -323,7 +362,7 @@ func findMem(n uintptr) (gcBlock, bool) {
 			// Unfortunately the heap could not be increased. This
 			// happens on baremetal systems for example (where all
 			// available RAM has already been dedicated to the heap).
-			runtimePanic("out of memory")
+			return 0, false
 		}
 	}
 }
@@ -518,7 +557,8 @@ func GC() {
 
 	// Show how much has been sweeped, for debugging.
 	if gcDebug {
-		dumpHeap()
+		// TODO
+		//dumpHeap()
 	}
 }
 
@@ -560,12 +600,12 @@ func finishMark() {
 }
 
 func sweep() {
-	for i := gcBlock(0); i < endBlock; i++ {
+	for i := gcBlock(0); i < endBlock; {
 		meta := i.meta()
 		switch meta.state() {
 		case blockStateHead, blockStateHeadNoPointers:
 			// This allocation has not been marked.
-			i.free()
+			i = i.free()
 
 		case blockStateHeadUnmanaged:
 			// Ignore this.
@@ -586,14 +626,98 @@ func sweep() {
 				runtimePanic("found a pending allocation that was not scanned")
 			}
 		}
+		i++
 	}
 	nextAlloc = 0
 }
 
-func (b gcBlock) free() {
-	memzero(unsafe.Pointer(b.meta()), uintptr(b.end()-b)+1)
+// free an allocation.
+// Block b must be a head.
+// This returns the next block after the freed allocation.
+func (b gcBlock) free() gcBlock {
+	for {
+		*b.meta() = 0
+		b++
+
+		if b >= endBlock || b.meta().state() != blockStateTail {
+			break
+		}
+	}
+
+	return b
 }
 
 func sizeBlocks(size uintptr) uintptr {
 	return (size + (bytesPerBlock - 1)) / bytesPerBlock
+}
+
+// scan the pointers within the allocation and mark them.
+func (b gcBlock) scan() {
+	for {
+		bitmap := b.meta().bitmap()
+		addr := uintptr(unsafe.Pointer(b.data()))
+		for bitmap != 0 {
+			if bitmap&1 != 0 {
+				markRoot(addr, *(*uintptr)(unsafe.Pointer(addr)))
+			}
+			bitmap >>= 1
+			addr += ptrAlign
+		}
+
+		// Move on to the next block.
+		b++
+		if b >= endBlock || b.meta().state() != blockStateTail {
+			break
+		}
+	}
+}
+
+// applyLayout applies a memory layout to an allocation.
+func (b gcBlock) applyLayout(layout unsafe.Pointer) {
+	// Decode the size and bitmap of the type.
+	size := *(*uintptr)(layout)
+	bitmap := uintptr(layout) + ptrSize
+	bitmapBytes := (size + 7) / 8
+	bitmapFullBytes := size / 8
+	bitmapExtraBits := uint8(size % 8)
+
+	// Copy bits from the bitmap into the metadata.
+	var i uintptr
+	var buf uint16
+	var buffered uint8
+	for {
+		// Fill the buffer with GC bitmap data.
+		for buffered < wordsPerBlock {
+			buf |= *(*uint8)(unsafe.Pointer(bitmap + i)) << buffered
+			if i == bitmapFullBytes {
+				// This is the last byte of the bitmap, so it has fewer useful bits.
+				buffered += bitmapExtraBits
+			} else {
+				// A full additional byte is now buffered.
+				buffered += 8
+			}
+			i++
+			if i >= bitmapBytes {
+				// Loop back to the start of the bitmap.
+				i = 0
+			}
+		}
+
+		// Store the GC bitmap data in the block metadatas.
+		meta := b.meta()
+		meta.setBitmap(buf & ((1 << wordsPerBlock) - 1))
+		buffered -= wordsPerBlock
+
+		// Move to the next block.
+		b++
+		if b >= endBlock || b.meta().state() != blockStateTail {
+			// Mask away any incomplete trailing pointery memory.
+			overhang := (ptrSize - ptrAlign) / ptrAlign
+			if overhang != 0 {
+				mask := (uint8(1) << (wordsPerBlock - overhang)) - 1
+				meta.setBitmap(meta.bitmap() & mask)
+			}
+			break
+		}
+	}
 }
